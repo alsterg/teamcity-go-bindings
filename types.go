@@ -1,6 +1,6 @@
 package teamcity
 
-import 	"github.com/sethgrid/pester"
+import "github.com/sethgrid/pester"
 
 type Client struct {
 	HTTPClient *pester.Client
@@ -10,12 +10,12 @@ type Client struct {
 }
 
 type BuildLocator struct {
-	BuildType string
-	Branch    string
-	Status    string
-	Running   string
-	Canceled  string
-	Count     string
+	BuildType string `yaml:"build_type"`
+	Branch    string `yaml:"branch"`
+	Status    string `yaml:"status"`
+	Running   string `yaml:"running"`
+	Canceled  string `yaml:"canceled"`
+	Count     string `yaml:"count"`
 }
 
 type BuildTypeLocator struct {
@@ -154,16 +154,16 @@ type Builds struct {
 }
 
 type BuildConfigurations struct {
-	Count int `json:"count"`
-	Href string `json:"href"`
+	Count     int    `json:"count"`
+	Href      string `json:"href"`
 	BuildType []struct {
-		ID string `json:"id"`
-		Name string `json:"name"`
+		ID          string `json:"id"`
+		Name        string `json:"name"`
 		ProjectName string `json:"projectName"`
-		ProjectID string `json:"projectId"`
-		Href string `json:"href"`
-		WebURL string `json:"webUrl"`
+		ProjectID   string `json:"projectId"`
+		Href        string `json:"href"`
+		WebURL      string `json:"webUrl"`
 		Description string `json:"description,omitempty"`
-		Paused bool `json:"paused,omitempty"`
+		Paused      bool   `json:"paused,omitempty"`
 	} `json:"buildType"`
 }
