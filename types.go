@@ -28,14 +28,14 @@ type BuildStatistics struct {
 }
 
 type Build struct {
-	ID          int    `json:"id"`
-	BuildTypeID string `json:"buildTypeId"`
-	Number      string `json:"number"`
-	Status      string `json:"status"`
-	State       string `json:"state"`
-	BranchName  string `json:"branchName"`
-	Href        string `json:"href"`
-	WebURL      string `json:"webUrl"`
+	ID          int         `json:"id"`
+	BuildTypeID BuildTypeID `json:"buildTypeId"`
+	Number      string      `json:"number"`
+	Status      string      `json:"status"`
+	State       string      `json:"state"`
+	BranchName  string      `json:"branchName"`
+	Href        string      `json:"href"`
+	WebURL      string      `json:"webUrl"`
 }
 
 type Builds struct {
@@ -45,17 +45,31 @@ type Builds struct {
 	Build    []Build `json:"build"`
 }
 
-type BuildConfigurations struct {
-	Count     int    `json:"count"`
-	Href      string `json:"href"`
-	BuildType []struct {
-		ID          string `json:"id"`
-		Name        string `json:"name"`
-		ProjectName string `json:"projectName"`
-		ProjectID   string `json:"projectId"`
-		Href        string `json:"href"`
-		WebURL      string `json:"webUrl"`
-		Description string `json:"description,omitempty"`
-		Paused      bool   `json:"paused,omitempty"`
-	} `json:"buildType"`
+type BuildTypeID string
+
+type BuildType struct {
+	ID          BuildTypeID `json:"id"`
+	Name        string      `json:"name"`
+	ProjectName string      `json:"projectName"`
+	ProjectID   string      `json:"projectId"`
+	Href        string      `json:"href"`
+	WebURL      string      `json:"webUrl"`
+	Description string      `json:"description,omitempty"`
+	Paused      bool        `json:"paused,omitempty"`
+}
+
+type BuildConfiguration struct {
+	Count      int         `json:"count"`
+	Href       string      `json:"href"`
+	BuildTypes []BuildType `json:"buildType"`
+}
+
+type Branch struct {
+	Name    string `json:"name"`
+	Default bool   `json:"default,omitempty"`
+}
+
+type Branches struct {
+	Count  int      `json:"count"`
+	Branch []Branch `json:"branch"`
 }

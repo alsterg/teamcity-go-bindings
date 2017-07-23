@@ -31,7 +31,7 @@ func New(host, username, password string) *Client {
 
 func NewBuildLocator() *BuildLocator {
 	return &BuildLocator{
-		Branch: "default:any",
+		Branch: "",
 		Count:  "1",
 	}
 }
@@ -131,7 +131,7 @@ func (c *Client) GetBuildsByParams(bl BuildLocator) (Builds, error) {
 			result.Build = append(result.Build, statistics.Build[i])
 		}
 
-		if statistics.NextHref != "" {
+		if bl.Count == "" && statistics.NextHref != "" {
 			url = c.host + statistics.NextHref
 		} else {
 			break
@@ -140,8 +140,8 @@ func (c *Client) GetBuildsByParams(bl BuildLocator) (Builds, error) {
 	return result, nil
 }
 
-func (c *Client) GetAllBuildConfigurations() (BuildConfigurations, error) {
-	statistics := BuildConfigurations{}
+func (c *Client) GetAllBuildConfigurations() (BuildConfiguration, error) {
+	statistics := BuildConfiguration{}
 
 	url := c.host + "/app/rest/buildTypes?="
 	req, err := http.NewRequest("GET", url, nil)
@@ -177,4 +177,42 @@ func (c *Client) GetAllBuildConfigurations() (BuildConfigurations, error) {
 
 	return statistics, nil
 
+}
+
+func (c *Client) GetAllBranches(bt BuildTypeID) (Branches, error) {
+	branches := Branches{}
+
+	url := c.host + "/app/rest/buildTypes/id:" + string(bt) + "/branches"
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return branches, err
+	}
+	req.Header.Add("Accept", "application/json")
+	res, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return branches, err
+	}
+	if res.StatusCode == 401 {
+		req.SetBasicAuth(c.username, c.password)
+		res, err = c.HTTPClient.Do(req)
+		if err != nil {
+			return branches, err
+		}
+	}
+
+	if res.StatusCode == 404 {
+		return branches, nil
+	}
+
+	defer res.Body.Close()
+	body, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		return branches, err
+	}
+
+	if err := json.Unmarshal(body, &branches); err != nil {
+		return branches, err
+	}
+
+	return branches, nil
 }
