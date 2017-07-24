@@ -28,7 +28,7 @@ type BuildStatistics struct {
 }
 
 type Build struct {
-	ID          int         `json:"id"`
+	ID          BuildID     `json:"id"`
 	BuildTypeID BuildTypeID `json:"buildTypeId"`
 	Number      string      `json:"number"`
 	Status      string      `json:"status"`
@@ -46,6 +46,7 @@ type Builds struct {
 }
 
 type BuildTypeID string
+type BuildID int
 
 type BuildType struct {
 	ID          BuildTypeID `json:"id"`
@@ -56,6 +57,14 @@ type BuildType struct {
 	WebURL      string      `json:"webUrl"`
 	Description string      `json:"description,omitempty"`
 	Paused      bool        `json:"paused,omitempty"`
+}
+
+type BuildDetails struct {
+	Count    int `json:"count"`
+	Property []struct {
+		Name  string `json:"name"`
+		Value string `json:"value"`
+	} `json:"property"`
 }
 
 type BuildConfiguration struct {
