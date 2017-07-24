@@ -205,7 +205,7 @@ func (c *Client) GetBuildDetails(id BuildID) (BuildDetails, error) {
 func (c *Client) GetAllBuildConfigurations() (BuildConfiguration, error) {
 	statistics := BuildConfiguration{}
 
-	url := c.host + "/app/rest/buildTypes?="
+	url := c.host + "/app/rest/buildTypes"
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return statistics, err
