@@ -3,15 +3,16 @@ package teamcity
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/fatih/structs"
-	"github.com/sethgrid/pester"
-	log "github.com/sirupsen/logrus"
 	"io/ioutil"
 	"net/http"
 	"net/http/cookiejar"
 	"regexp"
 	"strings"
 	"unicode"
+
+	"github.com/fatih/structs"
+	"github.com/sethgrid/pester"
+	log "github.com/sirupsen/logrus"
 )
 
 func New(host, username, password string) *Client {
@@ -46,7 +47,7 @@ func processParams(str interface{}) string {
 		if v == "" {
 			continue
 		}
-		fieldName := []rune(string(k))
+		fieldName := []rune(k)
 		fieldName[0] = unicode.ToLower(fieldName[0])
 		res += "," + string(fieldName) + ":" + v.(string)
 	}
@@ -63,6 +64,7 @@ func (c *Client) GetBuildStat(id int) (BuildStatistics, error) {
 		return statistics, err
 	}
 	req.Header.Add("Accept", "application/json")
+	req.Close = true
 	res, err := c.HTTPClient.Do(req)
 	if err != nil {
 		return statistics, err
@@ -103,6 +105,7 @@ func (c *Client) GetBuildsByParams(bl BuildLocator) (Builds, error) {
 			return statistics, err
 		}
 		req.Header.Add("Accept", "application/json")
+		req.Close = true
 		res, err := c.HTTPClient.Do(req)
 		if err != nil {
 			return statistics, err
@@ -149,8 +152,8 @@ func (c *Client) GetBuildsByParams(bl BuildLocator) (Builds, error) {
 			}
 			p := []string{}
 			for v := range d.Property {
-				r, _ := regexp.MatchString("build\\.vcs\\.branch", d.Property[v].Name)
-				if r {
+				re := regexp.MustCompile(`build\.vcs\.branch`)
+				if re.MatchString(d.Property[v].Name) {
 					p = append(p, strings.Replace(d.Property[v].Value, "refs/heads/", "", -1))
 				}
 			}
@@ -174,6 +177,7 @@ func (c *Client) GetBuildDetails(id BuildID) (BuildDetails, error) {
 		return buildDetails, err
 	}
 	req.Header.Add("Accept", "application/json")
+	req.Close = true
 	res, err := c.HTTPClient.Do(req)
 	if err != nil {
 		return buildDetails, err
@@ -211,6 +215,7 @@ func (c *Client) GetAllBuildConfigurations() (BuildConfiguration, error) {
 		return statistics, err
 	}
 	req.Header.Add("Accept", "application/json")
+	req.Close = true
 	res, err := c.HTTPClient.Do(req)
 	if err != nil {
 		return statistics, err
@@ -250,6 +255,7 @@ func (c *Client) GetAllBranches(bt BuildTypeID) (Branches, error) {
 		return branches, err
 	}
 	req.Header.Add("Accept", "application/json")
+	req.Close = true
 	res, err := c.HTTPClient.Do(req)
 	if err != nil {
 		return branches, err
