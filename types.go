@@ -10,12 +10,12 @@ type Client struct {
 }
 
 type BuildLocator struct {
-	BuildType string `yaml:"build_type"`
-	Branch    string `yaml:"branch"`
-	Status    string `yaml:"status"`
-	Running   string `yaml:"running"`
-	Canceled  string `yaml:"canceled"`
-	Count     string `yaml:"count"`
+	BuildType BuildTypeID `yaml:"build_type"`
+	Branch    string      `yaml:"branch"`
+	Status    string      `yaml:"status"`
+	Running   string      `yaml:"running"`
+	Canceled  string      `yaml:"canceled"`
+	Count     string      `yaml:"count"`
 }
 
 type BuildStatistics struct {

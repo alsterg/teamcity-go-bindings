@@ -7,10 +7,14 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 	"unicode"
 
 	"github.com/fatih/structs"
+	"github.com/orcaman/concurrent-map"
 	"github.com/sethgrid/pester"
 	log "github.com/sirupsen/logrus"
 )
@@ -24,6 +28,7 @@ func New(host, username, password string) *Client {
 	client.HTTPClient.Backoff = pester.ExponentialBackoff
 	client.HTTPClient.KeepLog = true
 	client.HTTPClient.Jar = cookieJar
+	client.HTTPClient.Timeout = time.Duration(60 * time.Second)
 
 	client.username = username
 	client.password = password
@@ -209,7 +214,7 @@ func (c *Client) GetBuildDetails(id BuildID) (BuildDetails, error) {
 func (c *Client) GetAllBuildConfigurations() (BuildConfiguration, error) {
 	statistics := BuildConfiguration{}
 
-	url := c.host + "/app/rest/buildTypes"
+	url := c.host + "/app/rest/buildTypes?locator=paused:false"
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return statistics, err
@@ -238,6 +243,7 @@ func (c *Client) GetAllBuildConfigurations() (BuildConfiguration, error) {
 		return statistics, err
 	}
 
+	// log.Println(string(body))
 	if err := json.Unmarshal(body, &statistics); err != nil {
 		return statistics, err
 	}
@@ -261,6 +267,7 @@ func (c *Client) GetAllBranches(bt BuildTypeID) (Branches, error) {
 		return branches, err
 	}
 	if res.StatusCode == 401 {
+		log.Println("Have to reauth...")
 		req.SetBasicAuth(c.username, c.password)
 		res, err = c.HTTPClient.Do(req)
 		if err != nil {
@@ -283,4 +290,140 @@ func (c *Client) GetAllBranches(bt BuildTypeID) (Branches, error) {
 	}
 
 	return branches, nil
+}
+
+func (c *Client) GetLatestBuild(bl BuildLocator) /*(Builds, error)*/ {
+	// start := time.Now()
+
+	nBranches := cmap.New()
+	nBuilds := cmap.New()
+	// builds := Builds{}
+
+	// type BuildLocator struct {
+	// 	BuildType string `yaml:"build_type"`
+	// 	Branch    string `yaml:"branch"`
+	// 	Status    string `yaml:"status"`
+	// 	Running   string `yaml:"running"`
+	// 	Canceled  string `yaml:"canceled"`
+	// 	Count     string `yaml:"count"`
+	// }
+	bc := make(chan BuildTypeID)
+	chBtb := make(chan map[BuildTypeID][]Branch)
+	chL := make(chan BuildLocator, 10000)
+
+	wg := new(sync.WaitGroup)
+
+	wg.Add(1)
+	totalBuildFilters := 0
+	mutex2 := new(sync.Mutex)
+	go func() {
+		defer wg.Done()
+
+		for m := range chBtb {
+			for k, v := range m {
+				if v == nil {
+					f := BuildLocator{
+						BuildType: k,
+						Branch:    "",
+						Count:     "1",
+					}
+					chL <- f
+					fmt.Println("Filter: %s", f)
+					mutex2.Lock()
+					totalBuildFilters++
+					mutex2.Unlock()
+				} else {
+					for z := range v {
+						f := BuildLocator{
+							BuildType: k,
+							Branch:    v[z].Name,
+							Count:     "1",
+						}
+						chL <- f
+						fmt.Println("Filter: %s", f)
+						mutex2.Lock()
+						totalBuildFilters++
+						mutex2.Unlock()
+					}
+				}
+			}
+		}
+		close(chL)
+		// log.Printf("Combined filters: %d", counter2)
+	}()
+
+	wg.Add(1)
+	totalBranches := 0
+	go func() {
+		defer wg.Done()
+
+		wg1 := new(sync.WaitGroup)
+		for btID := range bc {
+			wg1.Add(1)
+			mutex := new(sync.Mutex)
+			go func(bt BuildTypeID) {
+				defer wg1.Done()
+				// log.Printf("Working with build type '%s'", bt)
+				// time.Sleep(1 * time.Second)
+				br, err := c.GetAllBranches(bt)
+				if err != nil {
+					log.Errorf("Failed to get branches for %s: %v", bt, err)
+					return
+				}
+				// log.Println(c.HTTPClient.LogString())
+				if br.Count == 1 {
+					chBtb <- map[BuildTypeID][]Branch{bt: nil}
+					mutex.Lock()
+					// totalBranches += br.Count
+					mutex.Unlock()
+				} else {
+					chBtb <- map[BuildTypeID][]Branch{bt: br.Branch}
+					mutex.Lock()
+					totalBranches += br.Count
+					mutex.Unlock()
+				}
+				log.Printf("BuildType: %s, branches: %v", bt, br)
+				// counter++
+			}(btID)
+		}
+		wg1.Wait()
+		close(chBtb)
+	}()
+
+	totalBuildConfigs := 0
+	mutex1 := new(sync.Mutex)
+	if bl.BuildType == "" {
+		bcAll, err := c.GetAllBuildConfigurations()
+		if err != nil {
+			log.Println(err)
+		}
+		// log.Println(bcAll)
+		for _, bt := range bcAll.BuildTypes {
+			bc <- bt.ID
+			mutex1.Lock()
+			totalBuildConfigs++
+			mutex1.Unlock()
+			log.Printf("'%s' added to 'bc' channel\n", bt.ID)
+		}
+	} else {
+		bc <- bl.BuildType
+		mutex1.Lock()
+		totalBuildConfigs++
+		mutex1.Unlock()
+	}
+	close(bc)
+
+	// log.Println(bc)
+
+	wg.Wait()
+	// log.Printf("Added to channel: %d, got branches for: %d, duration: %v", counter1, counter, time.Since(start))
+	iter := nBranches.IterBuffered()
+	res := 0
+	for v := range iter {
+		s, _ := strconv.ParseInt(v.Val.(string), 10, 0)
+		res += int(s)
+	}
+	log.Printf("nBuilds: %d, nBranches (keys): %d, nBranches (values): %d", nBuilds.Count(), nBranches.Count(), res)
+	log.Printf("Total branches: %d, total build configs: %d, total build filters: %d", totalBranches, totalBuildConfigs, totalBuildFilters)
+	// return builds, nil
 }
