@@ -7,19 +7,19 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
 
 	"github.com/fatih/structs"
-	"github.com/orcaman/concurrent-map"
 	"github.com/sethgrid/pester"
 	log "github.com/sirupsen/logrus"
 )
 
-func New(host, username, password string) *Client {
+var chRequestsResponses = make(chan requestResponse)
+
+func New(host, username, password string, concurrency int) *Client {
 	client := &Client{}
 	cookieJar, _ := cookiejar.New(nil)
 
@@ -34,7 +34,34 @@ func New(host, username, password string) *Client {
 	client.password = password
 	client.host = host
 
+	chLimit := make(chan struct{}, concurrency}
+	go client.processRequestsQueue()
 	return client
+}
+
+func (c *Client) processRequestsQueue() {
+	for r := range chRequestsResponses {
+		res, err := c.HTTPClient.Do(r.request)
+		if err != nil {
+			//
+		}
+		if res.StatusCode == 401 {
+			log.Println("Have to reauth...")
+			r.request.SetBasicAuth(c.username, c.password)
+			res, err = c.HTTPClient.Do(r.request)
+			if err != nil {
+				// return branches, err
+			}
+		}
+
+		if res.StatusCode == 404 {
+			// return branches, nil
+		}
+
+		defer res.Body.Close()
+		r.response <- res
+
+	}
 }
 
 func NewBuildLocator() *BuildLocator {
@@ -54,7 +81,7 @@ func processParams(str interface{}) string {
 		}
 		fieldName := []rune(k)
 		fieldName[0] = unicode.ToLower(fieldName[0])
-		res += "," + string(fieldName) + ":" + v.(string)
+		res += "," + string(fieldName) + ":" + fmt.Sprintf("%v", v)
 	}
 
 	return strings.TrimLeft(res, ",")
@@ -102,6 +129,7 @@ func (c *Client) GetBuildStat(id int) (BuildStatistics, error) {
 func (c *Client) GetBuildsByParams(bl BuildLocator) (Builds, error) {
 	result := Builds{}
 	url := c.host + "/app/rest/builds/?locator=" + processParams(bl)
+	log.Printf("URL: %s", url)
 
 	for {
 		statistics := Builds{}
@@ -295,8 +323,7 @@ func (c *Client) GetAllBranches(bt BuildTypeID) (Branches, error) {
 func (c *Client) GetLatestBuild(bl BuildLocator) /*(Builds, error)*/ {
 	// start := time.Now()
 
-	nBranches := cmap.New()
-	nBuilds := cmap.New()
+	sem := make(chan struct{}, 5)
 	// builds := Builds{}
 
 	// type BuildLocator struct {
@@ -309,17 +336,56 @@ func (c *Client) GetLatestBuild(bl BuildLocator) /*(Builds, error)*/ {
 	// }
 	bc := make(chan BuildTypeID)
 	chBtb := make(chan map[BuildTypeID][]Branch)
-	chL := make(chan BuildLocator, 10000)
+	chL := make(chan BuildLocator)
+	chBuilds := make(chan Build, 10000)
 
 	wg := new(sync.WaitGroup)
 
+	totalBuildsFound := 0
 	wg.Add(1)
-	totalBuildFilters := 0
-	mutex2 := new(sync.Mutex)
 	go func() {
 		defer wg.Done()
+		wgLocal := new(sync.WaitGroup)
+		log.Println("Running builds")
+		for filter := range chL {
+			log.Printf("Start working with filter %v", filter)
+			wgLocal.Add(1)
+			sem <- struct{}{}
+			log.Printf("builds / Start working with filter %v", filter)
+			go func(f BuildLocator) {
+				defer func() {
+					wgLocal.Done()
+					<-sem
+				}()
+				log.Printf("2 / Working with filter: %v", f)
+				build, err := c.GetBuildsByParams(f)
+				if err != nil {
+					log.Error(err)
+					return
+				}
 
+				if len(build.Build) != 1 {
+					log.Errorf("Failed to get latest build for filter: %s", f)
+				} else {
+					log.Printf("Writing build collected by filter %v to channel", f)
+					chBuilds <- build.Build[0]
+					log.Printf("Wrote build collected by filter %v to channel", f)
+					// mutex.Lock()
+					totalBuildsFound++
+					// mutex.Unlock()
+				}
+			}(filter)
+		}
+		wgLocal.Wait()
+	}()
+
+	wg.Add(1)
+	totalBuildFilters := 0
+	go func() {
+		defer wg.Done()
+		// mutex := new(sync.Mutex)
 		for m := range chBtb {
+			log.Printf("3 / Working with: %v", m)
 			for k, v := range m {
 				if v == nil {
 					f := BuildLocator{
@@ -327,11 +393,13 @@ func (c *Client) GetLatestBuild(bl BuildLocator) /*(Builds, error)*/ {
 						Branch:    "",
 						Count:     "1",
 					}
+					log.Printf("Writing filter %v to channel", f)
 					chL <- f
-					fmt.Println("Filter: %s", f)
-					mutex2.Lock()
+					log.Printf("Wrote filter %v to channel", f)
+					// log.Printf("Filter: %s", f)
+					// mutex.Lock()
 					totalBuildFilters++
-					mutex2.Unlock()
+					// mutex.Unlock()
 				} else {
 					for z := range v {
 						f := BuildLocator{
@@ -339,11 +407,12 @@ func (c *Client) GetLatestBuild(bl BuildLocator) /*(Builds, error)*/ {
 							Branch:    v[z].Name,
 							Count:     "1",
 						}
+						log.Printf("Writing filter %v to channel", f)
 						chL <- f
-						fmt.Println("Filter: %s", f)
-						mutex2.Lock()
+						log.Printf("Wrote filter %v to channel", f)
+						// mutex.Lock()
 						totalBuildFilters++
-						mutex2.Unlock()
+						// mutex.Unlock()
 					}
 				}
 			}
@@ -352,18 +421,20 @@ func (c *Client) GetLatestBuild(bl BuildLocator) /*(Builds, error)*/ {
 		// log.Printf("Combined filters: %d", counter2)
 	}()
 
-	wg.Add(1)
 	totalBranches := 0
 	go func() {
-		defer wg.Done()
-
-		wg1 := new(sync.WaitGroup)
+		wg := new(sync.WaitGroup)
+		// mutex := new(sync.Mutex)
 		for btID := range bc {
-			wg1.Add(1)
-			mutex := new(sync.Mutex)
+			wg.Add(1)
+			// log.Printf("1 / Length sem = %d", len(sem))
+			sem <- struct{}{}
 			go func(bt BuildTypeID) {
-				defer wg1.Done()
-				// log.Printf("Working with build type '%s'", bt)
+				defer func() {
+					wg.Done()
+					<-sem
+				}()
+				log.Printf("Working with build type '%s'", bt)
 				// time.Sleep(1 * time.Second)
 				br, err := c.GetAllBranches(bt)
 				if err != nil {
@@ -371,27 +442,31 @@ func (c *Client) GetLatestBuild(bl BuildLocator) /*(Builds, error)*/ {
 					return
 				}
 				// log.Println(c.HTTPClient.LogString())
-				if br.Count == 1 {
+				if len(br.Branch) == 1 {
+					log.Printf("Writing branches for %s build type", bt)
 					chBtb <- map[BuildTypeID][]Branch{bt: nil}
-					mutex.Lock()
-					// totalBranches += br.Count
-					mutex.Unlock()
-				} else {
-					chBtb <- map[BuildTypeID][]Branch{bt: br.Branch}
-					mutex.Lock()
+					log.Printf("Wrote branches for %s build type", bt)
+					// mutex.Lock()
 					totalBranches += br.Count
-					mutex.Unlock()
+					// mutex.Unlock()
+				} else {
+					log.Printf("Writing branches for %s build type", bt)
+					chBtb <- map[BuildTypeID][]Branch{bt: br.Branch}
+					log.Printf("Wrote branches for %s build type", bt)
+					// mutex.Lock()
+					totalBranches += br.Count
+					// mutex.Unlock()
 				}
 				log.Printf("BuildType: %s, branches: %v", bt, br)
 				// counter++
 			}(btID)
 		}
-		wg1.Wait()
+		wg.Wait()
 		close(chBtb)
 	}()
 
 	totalBuildConfigs := 0
-	mutex1 := new(sync.Mutex)
+	// mutex := new(sync.Mutex)
 	if bl.BuildType == "" {
 		bcAll, err := c.GetAllBuildConfigurations()
 		if err != nil {
@@ -400,16 +475,16 @@ func (c *Client) GetLatestBuild(bl BuildLocator) /*(Builds, error)*/ {
 		// log.Println(bcAll)
 		for _, bt := range bcAll.BuildTypes {
 			bc <- bt.ID
-			mutex1.Lock()
+			// mutex.Lock()
 			totalBuildConfigs++
-			mutex1.Unlock()
+			// mutex.Unlock()
 			log.Printf("'%s' added to 'bc' channel\n", bt.ID)
 		}
 	} else {
 		bc <- bl.BuildType
-		mutex1.Lock()
+		// mutex.Lock()
 		totalBuildConfigs++
-		mutex1.Unlock()
+		// mutex.Unlock()
 	}
 	close(bc)
 
@@ -417,13 +492,6 @@ func (c *Client) GetLatestBuild(bl BuildLocator) /*(Builds, error)*/ {
 
 	wg.Wait()
 	// log.Printf("Added to channel: %d, got branches for: %d, duration: %v", counter1, counter, time.Since(start))
-	iter := nBranches.IterBuffered()
-	res := 0
-	for v := range iter {
-		s, _ := strconv.ParseInt(v.Val.(string), 10, 0)
-		res += int(s)
-	}
-	log.Printf("nBuilds: %d, nBranches (keys): %d, nBranches (values): %d", nBuilds.Count(), nBranches.Count(), res)
-	log.Printf("Total branches: %d, total build configs: %d, total build filters: %d", totalBranches, totalBuildConfigs, totalBuildFilters)
+	log.Printf("Total branches: %d, total build configs: %d, total build filters: %d, total builds: %d", totalBranches, totalBuildConfigs, totalBuildFilters, totalBuildsFound)
 	// return builds, nil
 }

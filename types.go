@@ -1,12 +1,21 @@
 package teamcity
 
-import "github.com/sethgrid/pester"
+import (
+	"net/http"
+
+	"github.com/sethgrid/pester"
+)
 
 type Client struct {
 	HTTPClient *pester.Client
 	username   string
 	password   string
 	host       string
+}
+
+type requestResponse struct {
+	request  *http.Request
+	response chan *http.Response
 }
 
 type BuildLocator struct {
