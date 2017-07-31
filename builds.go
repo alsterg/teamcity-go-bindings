@@ -3,495 +3,296 @@ package teamcity
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"log"
 	"net/http"
-	"net/http/cookiejar"
-	"regexp"
-	"strings"
 	"sync"
-	"time"
-	"unicode"
 
-	"github.com/fatih/structs"
 	"github.com/sethgrid/pester"
-	log "github.com/sirupsen/logrus"
 )
 
-var chRequestsResponses = make(chan requestResponse)
+func New(url, username, password string, concurrencyLimit int) *Client {
+	if concurrencyLimit == 0 {
+		concurrencyLimit = 1000
+	}
 
-func New(host, username, password string, concurrency int) *Client {
-	client := &Client{}
-	cookieJar, _ := cookiejar.New(nil)
+	http := pester.New()
+	http.Concurrency = concurrencyLimit
+	http.MaxRetries = 5
+	http.Backoff = pester.ExponentialBackoff
+	http.KeepLog = true
 
-	client.HTTPClient = pester.New()
-	client.HTTPClient.MaxRetries = 5
-	client.HTTPClient.Backoff = pester.ExponentialBackoff
-	client.HTTPClient.KeepLog = true
-	client.HTTPClient.Jar = cookieJar
-	client.HTTPClient.Timeout = time.Duration(60 * time.Second)
+	client := &Client{
+		HTTPClient: http,
+		URL:        url,
+		Username:   username,
+		Password:   password,
+		Flow:       make(chan DataFlow, 10000),
+		semaphore:  make(chan bool, concurrencyLimit),
+	}
 
-	client.username = username
-	client.password = password
-	client.host = host
+	go client.processDataFlow()
 
-	chLimit := make(chan struct{}, concurrency}
-	go client.processRequestsQueue()
 	return client
 }
 
-func (c *Client) processRequestsQueue() {
-	for r := range chRequestsResponses {
-		res, err := c.HTTPClient.Do(r.request)
-		if err != nil {
-			//
-		}
-		if res.StatusCode == 401 {
-			log.Println("Have to reauth...")
-			r.request.SetBasicAuth(c.username, c.password)
-			res, err = c.HTTPClient.Do(r.request)
-			if err != nil {
-				// return branches, err
-			}
-		}
-
-		if res.StatusCode == 404 {
-			// return branches, nil
-		}
-
-		defer res.Body.Close()
-		r.response <- res
-
-	}
-}
-
-func NewBuildLocator() *BuildLocator {
-	return &BuildLocator{
-		Branch: "",
-		Count:  "1",
-	}
-}
-
-func processParams(str interface{}) string {
-	conv := structs.Map(str)
-	res := ""
-
-	for k, v := range conv {
-		if v == "" {
-			continue
-		}
-		fieldName := []rune(k)
-		fieldName[0] = unicode.ToLower(fieldName[0])
-		res += "," + string(fieldName) + ":" + fmt.Sprintf("%v", v)
-	}
-
-	return strings.TrimLeft(res, ",")
-}
-
-func (c *Client) GetBuildStat(id int) (BuildStatistics, error) {
-	statistics := BuildStatistics{}
-	url := fmt.Sprint(c.host, "/app/rest/builds/id:", id, "/statistics")
-
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return statistics, err
-	}
-	req.Header.Add("Accept", "application/json")
-	req.Close = true
-	res, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return statistics, err
-	}
-	if res.StatusCode == 401 {
-		req.SetBasicAuth(c.username, c.password)
-		res, err = c.HTTPClient.Do(req)
-		if err != nil {
-			return statistics, err
-		}
-	}
-
-	if res.StatusCode == 404 {
-		return statistics, nil
-	}
-
-	defer res.Body.Close()
-	body, err := ioutil.ReadAll(res.Body)
-	if err != nil {
-		return statistics, err
-	}
-
-	if err := json.Unmarshal(body, &statistics); err != nil {
-		return statistics, err
-	}
-
-	return statistics, nil
-}
-
-func (c *Client) GetBuildsByParams(bl BuildLocator) (Builds, error) {
-	result := Builds{}
-	url := c.host + "/app/rest/builds/?locator=" + processParams(bl)
-	log.Printf("URL: %s", url)
-
-	for {
-		statistics := Builds{}
-		req, err := http.NewRequest("GET", url, nil)
-		if err != nil {
-			return statistics, err
-		}
-		req.Header.Add("Accept", "application/json")
-		req.Close = true
-		res, err := c.HTTPClient.Do(req)
-		if err != nil {
-			return statistics, err
-		}
-		if res.StatusCode == 401 {
-			req.SetBasicAuth(c.username, c.password)
-			res, err = c.HTTPClient.Do(req)
-			if err != nil {
-				return statistics, err
-			}
-		}
-
-		if res.StatusCode == 404 {
-			return statistics, nil
-		}
-
-		defer res.Body.Close()
-		body, err := ioutil.ReadAll(res.Body)
-		if err != nil {
-			return statistics, err
-		}
-
-		if err := json.Unmarshal(body, &statistics); err != nil {
-			return statistics, err
-		}
-
-		for i := range statistics.Build {
-			result.Build = append(result.Build, statistics.Build[i])
-		}
-
-		if bl.Count == "" && statistics.NextHref != "" {
-			url = c.host + statistics.NextHref
-		} else {
-			break
-		}
-	}
-
-	for i := range result.Build {
-		if result.Build[i].BranchName == "" {
-			d, err := c.GetBuildDetails(result.Build[i].ID)
-			if err != nil {
-				log.Errorf("Failed to query build details for build ID %d: %v", result.Build[i].ID, err)
-				continue
-			}
-			p := []string{}
-			for v := range d.Property {
-				re := regexp.MustCompile(`build\.vcs\.branch`)
-				if re.MatchString(d.Property[v].Name) {
-					p = append(p, strings.Replace(d.Property[v].Value, "refs/heads/", "", -1))
-				}
-			}
-			// don't need branch name if build configuration has only one branch
-			if len(uniqSlice(p)) <= 1 {
-				result.Build[i].BranchName = ""
-			} else {
-				result.Build[i].BranchName = p[0]
-			}
-		}
-	}
-	return result, nil
+func (c *Client) Close() {
+	close(c.Flow)
 }
 
 func (c *Client) GetBuildDetails(id BuildID) (BuildDetails, error) {
 	buildDetails := BuildDetails{}
+	chData := DataFlow{
+		Response: make(chan *http.Response, 1),
+	}
 
-	url := fmt.Sprint(c.host, "/app/rest/builds/id:", id, "/resulting-properties")
+	url := fmt.Sprint(c.URL, "/app/rest/builds/id:", id, "/resulting-properties")
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return buildDetails, err
 	}
-	req.Header.Add("Accept", "application/json")
-	req.Close = true
-	res, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return buildDetails, err
-	}
-	if res.StatusCode == 401 {
-		req.SetBasicAuth(c.username, c.password)
-		res, err = c.HTTPClient.Do(req)
+
+	chData.Request = req
+	c.Flow <- chData
+
+	for res := range chData.Response {
+		body, err := processResponse(res)
 		if err != nil {
 			return buildDetails, err
 		}
-	}
 
-	if res.StatusCode == 404 {
-		return buildDetails, nil
-	}
-
-	defer res.Body.Close()
-	body, err := ioutil.ReadAll(res.Body)
-	if err != nil {
-		return buildDetails, err
-	}
-
-	if err := json.Unmarshal(body, &buildDetails); err != nil {
-		return buildDetails, err
+		if err := json.Unmarshal(body, &buildDetails); err != nil {
+			return buildDetails, err
+		}
 	}
 	return buildDetails, nil
 }
 
-func (c *Client) GetAllBuildConfigurations() (BuildConfiguration, error) {
-	statistics := BuildConfiguration{}
+func (c *Client) GetAllBuildConfigurations() (BuildConfigurations, error) {
+	buildConfigs := BuildConfigurations{}
+	chData := DataFlow{
+		Response: make(chan *http.Response, 1),
+	}
 
-	url := c.host + "/app/rest/buildTypes?locator=paused:false"
+	url := fmt.Sprint(c.URL, "/app/rest/buildTypes")
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return statistics, err
+		return buildConfigs, err
 	}
-	req.Header.Add("Accept", "application/json")
-	req.Close = true
-	res, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return statistics, err
-	}
-	if res.StatusCode == 401 {
-		req.SetBasicAuth(c.username, c.password)
-		res, err = c.HTTPClient.Do(req)
+
+	chData.Request = req
+	c.Flow <- chData
+
+	for res := range chData.Response {
+		body, err := processResponse(res)
 		if err != nil {
-			return statistics, err
+			return buildConfigs, err
+		}
+		if err := json.Unmarshal(body, &buildConfigs); err != nil {
+			return buildConfigs, err
 		}
 	}
-
-	if res.StatusCode == 404 {
-		return statistics, nil
-	}
-
-	defer res.Body.Close()
-	body, err := ioutil.ReadAll(res.Body)
-	if err != nil {
-		return statistics, err
-	}
-
-	// log.Println(string(body))
-	if err := json.Unmarshal(body, &statistics); err != nil {
-		return statistics, err
-	}
-
-	return statistics, nil
-
+	return buildConfigs, nil
 }
 
 func (c *Client) GetAllBranches(bt BuildTypeID) (Branches, error) {
 	branches := Branches{}
+	chData := DataFlow{
+		Response: make(chan *http.Response, 1),
+	}
 
-	url := c.host + "/app/rest/buildTypes/id:" + string(bt) + "/branches"
+	url := fmt.Sprint(c.URL, "/app/rest/buildTypes/id:", bt, "/branches")
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return branches, err
 	}
-	req.Header.Add("Accept", "application/json")
-	req.Close = true
-	res, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return branches, err
-	}
-	if res.StatusCode == 401 {
-		log.Println("Have to reauth...")
-		req.SetBasicAuth(c.username, c.password)
-		res, err = c.HTTPClient.Do(req)
+
+	chData.Request = req
+	c.Flow <- chData
+
+	for res := range chData.Response {
+		body, err := processResponse(res)
 		if err != nil {
 			return branches, err
 		}
+		if err := json.Unmarshal(body, &branches); err != nil {
+			return branches, err
+		}
 	}
-
-	if res.StatusCode == 404 {
-		return branches, nil
-	}
-
-	defer res.Body.Close()
-	body, err := ioutil.ReadAll(res.Body)
-	if err != nil {
-		return branches, err
-	}
-
-	if err := json.Unmarshal(body, &branches); err != nil {
-		return branches, err
-	}
-
 	return branches, nil
 }
 
-func (c *Client) GetLatestBuild(bl BuildLocator) /*(Builds, error)*/ {
-	// start := time.Now()
+func (c *Client) GetBuildsByParams(bl BuildLocator) (Builds, error) {
+	builds := Builds{}
 
-	sem := make(chan struct{}, 5)
-	// builds := Builds{}
+	url := fmt.Sprint(c.URL, "/app/rest/builds/?locator=", convertLocatorToString(bl))
 
-	// type BuildLocator struct {
-	// 	BuildType string `yaml:"build_type"`
-	// 	Branch    string `yaml:"branch"`
-	// 	Status    string `yaml:"status"`
-	// 	Running   string `yaml:"running"`
-	// 	Canceled  string `yaml:"canceled"`
-	// 	Count     string `yaml:"count"`
-	// }
-	bc := make(chan BuildTypeID)
-	chBtb := make(chan map[BuildTypeID][]Branch)
-	chL := make(chan BuildLocator)
-	chBuilds := make(chan Build, 10000)
-
-	wg := new(sync.WaitGroup)
-
-	totalBuildsFound := 0
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		wgLocal := new(sync.WaitGroup)
-		log.Println("Running builds")
-		for filter := range chL {
-			log.Printf("Start working with filter %v", filter)
-			wgLocal.Add(1)
-			sem <- struct{}{}
-			log.Printf("builds / Start working with filter %v", filter)
-			go func(f BuildLocator) {
-				defer func() {
-					wgLocal.Done()
-					<-sem
-				}()
-				log.Printf("2 / Working with filter: %v", f)
-				build, err := c.GetBuildsByParams(f)
-				if err != nil {
-					log.Error(err)
-					return
-				}
-
-				if len(build.Build) != 1 {
-					log.Errorf("Failed to get latest build for filter: %s", f)
-				} else {
-					log.Printf("Writing build collected by filter %v to channel", f)
-					chBuilds <- build.Build[0]
-					log.Printf("Wrote build collected by filter %v to channel", f)
-					// mutex.Lock()
-					totalBuildsFound++
-					// mutex.Unlock()
-				}
-			}(filter)
+	for {
+		buildsIter := Builds{}
+		chData := DataFlow{
+			Response: make(chan *http.Response, 1),
 		}
-		wgLocal.Wait()
-	}()
 
-	wg.Add(1)
-	totalBuildFilters := 0
-	go func() {
-		defer wg.Done()
-		// mutex := new(sync.Mutex)
-		for m := range chBtb {
-			log.Printf("3 / Working with: %v", m)
-			for k, v := range m {
-				if v == nil {
-					f := BuildLocator{
-						BuildType: k,
-						Branch:    "",
-						Count:     "1",
-					}
-					log.Printf("Writing filter %v to channel", f)
-					chL <- f
-					log.Printf("Wrote filter %v to channel", f)
-					// log.Printf("Filter: %s", f)
-					// mutex.Lock()
-					totalBuildFilters++
-					// mutex.Unlock()
-				} else {
-					for z := range v {
-						f := BuildLocator{
-							BuildType: k,
-							Branch:    v[z].Name,
-							Count:     "1",
-						}
-						log.Printf("Writing filter %v to channel", f)
-						chL <- f
-						log.Printf("Wrote filter %v to channel", f)
-						// mutex.Lock()
-						totalBuildFilters++
-						// mutex.Unlock()
-					}
-				}
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return builds, err
+		}
+
+		chData.Request = req
+		c.Flow <- chData
+
+		for res := range chData.Response {
+			body, err := processResponse(res)
+			if err != nil {
+				return builds, err
+			}
+			if err := json.Unmarshal(body, &buildsIter); err != nil {
+				return builds, err
 			}
 		}
-		close(chL)
-		// log.Printf("Combined filters: %d", counter2)
-	}()
 
-	totalBranches := 0
-	go func() {
-		wg := new(sync.WaitGroup)
-		// mutex := new(sync.Mutex)
-		for btID := range bc {
-			wg.Add(1)
-			// log.Printf("1 / Length sem = %d", len(sem))
-			sem <- struct{}{}
-			go func(bt BuildTypeID) {
-				defer func() {
-					wg.Done()
-					<-sem
-				}()
-				log.Printf("Working with build type '%s'", bt)
-				// time.Sleep(1 * time.Second)
-				br, err := c.GetAllBranches(bt)
-				if err != nil {
-					log.Errorf("Failed to get branches for %s: %v", bt, err)
-					return
-				}
-				// log.Println(c.HTTPClient.LogString())
-				if len(br.Branch) == 1 {
-					log.Printf("Writing branches for %s build type", bt)
-					chBtb <- map[BuildTypeID][]Branch{bt: nil}
-					log.Printf("Wrote branches for %s build type", bt)
-					// mutex.Lock()
-					totalBranches += br.Count
-					// mutex.Unlock()
-				} else {
-					log.Printf("Writing branches for %s build type", bt)
-					chBtb <- map[BuildTypeID][]Branch{bt: br.Branch}
-					log.Printf("Wrote branches for %s build type", bt)
-					// mutex.Lock()
-					totalBranches += br.Count
-					// mutex.Unlock()
-				}
-				log.Printf("BuildType: %s, branches: %v", bt, br)
-				// counter++
-			}(btID)
+		for i := range buildsIter.Builds {
+			if buildsIter.Builds[i].BranchName == "" {
+				buildsIter.Builds[i].BranchName = "<default>"
+			}
+			builds.Builds = append(builds.Builds, buildsIter.Builds[i])
 		}
-		wg.Wait()
-		close(chBtb)
-	}()
 
-	totalBuildConfigs := 0
-	// mutex := new(sync.Mutex)
-	if bl.BuildType == "" {
-		bcAll, err := c.GetAllBuildConfigurations()
+		if bl.Count == 0 && buildsIter.NextHref != "" {
+			url = c.URL + buildsIter.NextHref
+		} else {
+			break
+		}
+	}
+	return builds, nil
+}
+
+func (c *Client) GetBuildStat(id BuildID) (BuildStatistics, error) {
+	stat := BuildStatistics{}
+	chData := DataFlow{
+		Response: make(chan *http.Response, 1),
+	}
+
+	url := fmt.Sprint(c.URL, "/app/rest/builds/id:", id, "/statistics")
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return stat, err
+	}
+
+	chData.Request = req
+	c.Flow <- chData
+
+	for res := range chData.Response {
+		body, err := processResponse(res)
 		if err != nil {
-			log.Println(err)
+			return stat, err
 		}
-		// log.Println(bcAll)
-		for _, bt := range bcAll.BuildTypes {
-			bc <- bt.ID
-			// mutex.Lock()
-			totalBuildConfigs++
-			// mutex.Unlock()
-			log.Printf("'%s' added to 'bc' channel\n", bt.ID)
+		if err := json.Unmarshal(body, &stat); err != nil {
+			return stat, err
+		}
+	}
+
+	return stat, nil
+}
+
+func (c *Client) getBuildsByParamsPipelined(in <-chan BuildLocator, out chan<- Build) {
+	wg := new(sync.WaitGroup)
+	for filter := range in {
+		wg.Add(1)
+		go func(f BuildLocator) {
+			defer wg.Done()
+			build, err := c.GetBuildsByParams(f)
+			if err != nil {
+				log.Println(err)
+				return
+			}
+			if len(build.Builds) > 0 {
+				out <- build.Builds[0]
+			} else {
+				log.Printf("No builds found for build configuration '%s', branch '%s'", f.BuildType, f.Branch)
+				return
+			}
+		}(filter)
+	}
+	wg.Wait()
+	close(out)
+}
+
+func (c *Client) GetLatestBuild(bl BuildLocator) (Builds, error) {
+	chFilters := make(chan BuildLocator)
+	chBuilds := make(chan Build)
+	builds := Builds{}
+
+	go c.getBuildsByParamsPipelined(chFilters, chBuilds)
+
+	wg1 := new(sync.WaitGroup)
+	wg1.Add(1)
+	go func() {
+		defer wg1.Done()
+		for build := range chBuilds {
+			builds.Builds = append(builds.Builds, build)
+		}
+	}()
+
+	// get build types
+	buildTypes := []BuildTypeID{}
+	if bl.BuildType == "" {
+		bt, err := c.GetAllBuildConfigurations()
+		if err != nil {
+			log.Fatal(err)
+		}
+		for i := range bt.BuildTypes {
+			buildTypes = append(buildTypes, bt.BuildTypes[i].ID)
 		}
 	} else {
-		bc <- bl.BuildType
-		// mutex.Lock()
-		totalBuildConfigs++
-		// mutex.Unlock()
+		buildTypes = append(buildTypes, bl.BuildType)
 	}
-	close(bc)
 
-	// log.Println(bc)
+	// get branches and combine filters
+	wg2 := new(sync.WaitGroup)
+	if bl.Branch == "" {
+		for _, buildType := range buildTypes {
+			wg2.Add(1)
+			go func(bt BuildTypeID) {
+				defer wg2.Done()
+				branches, err := c.GetAllBranches(bt)
+				if err != nil {
+					log.Fatal(err)
+				}
+				for _, branch := range branches.Branches {
+					f := BuildLocator{
+						BuildType: bt,
+						Branch:    branch.Name,
+						Status:    bl.Status,
+						Running:   bl.Running,
+						Canceled:  bl.Canceled,
+						Count:     1,
+					}
+					chFilters <- f
+				}
+			}(buildType)
+		}
+		wg2.Wait()
+		close(chFilters)
+	} else {
+		for _, buildType := range buildTypes {
+			wg2.Add(1)
+			go func(bt BuildTypeID) {
+				defer wg2.Done()
+				f := BuildLocator{
+					BuildType: bt,
+					Branch:    bl.Branch,
+					Status:    bl.Status,
+					Running:   bl.Running,
+					Canceled:  bl.Canceled,
+					Count:     1,
+				}
+				chFilters <- f
+			}(buildType)
+		}
+		wg2.Wait()
+		close(chFilters)
+	}
 
-	wg.Wait()
-	// log.Printf("Added to channel: %d, got branches for: %d, duration: %v", counter1, counter, time.Since(start))
-	log.Printf("Total branches: %d, total build configs: %d, total build filters: %d, total builds: %d", totalBranches, totalBuildConfigs, totalBuildFilters, totalBuildsFound)
-	// return builds, nil
+	wg1.Wait()
+	return builds, nil
 }
