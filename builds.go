@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/sethgrid/pester"
@@ -117,6 +118,10 @@ func (c *Client) GetAllBranches(bt BuildTypeID) (Branches, error) {
 		if err := json.Unmarshal(body, &branches); err != nil {
 			return branches, err
 		}
+	}
+
+	for _, branch := range branches.Branches {
+		branch.Name = strings.Replace(branch.Name, "/refs/heads/", "", -1)
 	}
 	return branches, nil
 }
@@ -257,6 +262,9 @@ func (c *Client) GetLatestBuild(bl BuildLocator) (Builds, error) {
 				branches, err := c.GetAllBranches(bt)
 				if err != nil {
 					log.Fatal(err)
+				}
+				if len(branches.Branches) == 1 {
+					branches.Branches[0].Name = ""
 				}
 				for _, branch := range branches.Branches {
 					f := BuildLocator{
