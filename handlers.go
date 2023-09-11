@@ -39,7 +39,7 @@ func (c *Client) processDataFlow() {
 				return
 			}
 			if res.StatusCode == 401 {
-				d.Request.SetBasicAuth(c.Username, c.Password)
+				d.Request.Header.Add("Authorization", fmt.Sprintf("Bearer %s", c.Authtoken))
 				res, err = c.HTTPClient.Do(d.Request)
 				if err != nil {
 					log.Println(err)

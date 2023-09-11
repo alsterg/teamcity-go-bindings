@@ -14,8 +14,7 @@ type DataFlow struct {
 type Client struct {
 	HTTPClient *pester.Client
 	URL        string
-	Username   string
-	Password   string
+	Authtoken  string
 	Flow       chan DataFlow
 	semaphore  chan bool
 }
