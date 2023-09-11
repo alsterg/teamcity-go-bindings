@@ -3,7 +3,7 @@ Teamcity v10 API client for golang. Only basic methods have been implemented so 
 
 ## Installation
 ```
-$ go get -u github.com/Guidewire/teamcity-go-bindings
+$ go get -u github.com/alsterg/teamcity-go-bindings
 ```
 
 ## Usage example
@@ -14,12 +14,12 @@ import (
 	"fmt"
 	"log"
 
-	tc "github.com/guidewire/teamcity-go-bindings"
+	tc "github.com/alsterg/teamcity-go-bindings"
 )
 
 func main() {
 	// put your login and password here
-	client := tc.New("https://teamcity.com", "login", "password", 10)
+	client := tc.New("https://teamcity.com", "token", 10)
 
 	// Get all available build types
 	bt, err := client.GetAllBuildConfigurations()
